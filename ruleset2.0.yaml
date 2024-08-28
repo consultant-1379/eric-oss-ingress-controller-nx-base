@@ -1,0 +1,222 @@
+modelVersion: 2.0
+
+description: "OSS Ingress-nginx Pipeline"
+
+docker-images:
+  - adp-release-auto: armdocker.rnd.ericsson.se/sandbox/adp-staging/adp-cicd/bob-adp-release-auto:latest
+  - eric-enm-version-auto: armdocker.rnd.ericsson.se/proj-enm/eric-enm-version-auto:latest
+  - cenm-build-utilities: armdocker.rnd.ericsson.se/proj-enm/cenm-build-utilities:latest
+  - bob-gobuilder: armdocker.rnd.ericsson.se/proj-adp-cicd-drop/bob-gobuilder.adp-base-os:latest
+  - image-dr-check: armdocker.rnd.ericsson.se/proj-adp-cicd-drop/adp-image-dr-check:latest
+
+import:
+  common: common-properties.yaml
+
+# List of constants
+properties:
+  - image-name: eric-oss-ingress-controller-nx-base
+  - image-registry: armdocker.rnd.ericsson.se
+  - image-drop-repopath: proj-eric-oss-ingress-ctr-nx-drop
+  - image-dev-repopath: proj-eric-oss-ingress-ctr-nx-dev
+  - image-ci-repopath: proj-eric-oss-ingress-ctr-nx-ci-internal
+  - image-full-name-ci-internal: ${image-registry}/${image-ci-repopath}/${image-name}
+  - image-full-name: ${image-registry}/${image-drop-repopath}/${common.docker-image-name}
+  
+  - skipped-design-rules: "-DhelmDesignRule.config.DR-D1123-124=skip
+                           -DhelmDesignRule.config.DR-D1125-013=skip"
+  # Functional ID for your Team or CI group to push to Gerrit repo
+  - git-user: lciadm100
+  - git-repo-path: OSS/ENM-Parent/SQ-Gate/com.ericsson.oss.itpf.networking/eric-oss-ingress-controller-nx-base
+  - git-repo-url: ssh://${git-user}@gerrit-gamma.gic.ericsson.se:29418/${git-repo-path}
+  - git-repo: https://gerrit-gamma.gic.ericsson.se/#/admin/projects/${git-repo-path}
+
+env:
+  - RELEASE (default=true)
+  - ISO_VERSION
+  - BUILD_DATE (default = $(date +%d%m%Y-%H%M%S --utc))
+  - AUTHOR_NAME
+  - AUTHOR_EMAIL
+  - ENABLE_HELM_V3 (default=true)
+  - GERRIT_CHANGE_NUMBER
+  - DOCKER_CONFIG
+  - GERRIT_PATCHSET_REVISION
+  - KUBECONFIG (default=notset)
+  - RELEASE (default=false)
+  - USER (default=local)
+  - HELM_RELEASE (default=$USER-release)
+  - GERRIT_USERNAME
+  - GERRIT_PASSWORD
+  - IMAGE_REPO
+  - IMAGE_NAME
+  - IMAGE_TAG
+
+var:
+  - version
+  - rstate
+  - commithash
+  - image-repopath-internal
+  - image-full-name-internal
+  - image-repopath-drop
+  - userid-groupid
+  - image-dr-vm-args
+
+# Rules to execute
+rules:
+  # An integrated rule to execute multiple rules in one place.
+  release:
+    - rule: clean
+    - rule: init-dev
+    - rule: image
+    - rule: publish
+
+  # Clean workspace
+  clean:
+    - task: rm
+      cmd:
+        - rm -rf .bob/
+        - rm -rf build/
+        - rm -rf ingress-nginx/
+
+  # Dev Tasks: only used by manually publishing development/black builds by developers
+  init-dev:
+    - task: version
+      docker-image: adp-release-auto
+      cmd: generate-version --is-release false --output version
+    - task: rstate
+      docker-image: adp-release-auto
+      cmd: get_rstate.py ${var.version} > .bob/var.rstate
+    - task: commit
+      docker-image: adp-release-auto
+      cmd: git rev-parse --short HEAD > .bob/var.commithash
+    - task: image-repopath-internal
+      cmd: echo "${image-dev-repopath}" > .bob/var.image-repopath-internal
+    - task: image-full-name-internal
+      cmd: echo "${image-registry}/${image-dev-repopath}/${image-name}" > .bob/var.image-full-name-internal
+    - task: set-upload
+      cmd: echo "--debug" > .bob/var.pri_params
+
+  # CI-Internal Tasks: used by CI to use as temporary storage for testing, only CI user has write access.
+  init-review:
+    - task: version
+      docker-image: adp-release-auto
+      cmd: generate-version --is-release false --output version
+    - task: rstate
+      docker-image: adp-release-auto
+      cmd:  get_rstate.py ${var.version} > .bob/var.rstate
+    - task: commit
+      docker-image: adp-release-auto
+      cmd: git rev-parse --short HEAD > .bob/var.commithash
+    - task: image-repopath-internal
+      cmd: echo "${image-ci-repopath}" > .bob/var.image-repopath-internal
+    - task: image-full-name-internal
+      cmd: echo "${image-registry}/${image-ci-repopath}/${image-name}" > .bob/var.image-full-name-internal
+    - task: user
+      cmd: echo "$(id -u):$(id -g)" > .bob/var.userid-groupid
+    - task: adp-artifacts-properties
+      docker-image: adp-release-auto
+      cmd: generate-adp-artifacts
+        --image-only=true
+        --image-name ${image-name}
+        --image-version ${var.version}
+        --image-repo "${image-registry}/${var.image-repopath-internal}"
+    - task: image-dr-vm-args
+      cmd: echo " -DimageDesignRule.config.DR-D470203-041-A=disable -DimageDesignRule.config.DR-D470203-050-A=disable" > .bob/var.image-dr-vm-args
+       
+      
+  # Drop level tasks: used by CI to publish artifacts after successful CI pipeline execution for a drop build
+  init-drop:
+    - task: version
+      docker-image: adp-release-auto
+      cmd: generate-version --is-release true --output version
+    - task: rstate
+      docker-image: adp-release-auto
+      cmd: get_rstate.py ${var.version} > .bob/var.rstate
+    - task: commit
+      docker-image: adp-release-auto
+      cmd: git rev-parse --short HEAD > .bob/var.commithash
+    - task: image-repopath-internal
+      cmd: echo "${image-ci-repopath}" > .bob/var.image-repopath-internal
+    - task: image-repopath-drop
+      cmd: echo "${image-drop-repopath}" > .bob/var.image-repopath-drop
+    - task: image-full-name-internal
+      cmd: echo "${image-registry}/${image-ci-repopath}/${common.docker-image-name}" > .bob/var.image-full-name-internal
+    - task: user
+      cmd: echo "$(id -u):$(id -g)" > .bob/var.userid-groupid
+    - task: adp-artifacts-properties
+      docker-image: adp-release-auto
+      cmd: generate-adp-artifacts
+        --image-only=true
+        --image-name ${common.docker-image-name}
+        --image-version ${var.version}
+        --image-repo "${image-registry}/${var.image-repopath-drop}"
+    - task: image-dr-vm-args
+      cmd: echo " -DimageDesignRule.config.DR-D470203-041-A=disable -DimageDesignRule.config.DR-D470203-050-A=disable" > .bob/var.image-dr-vm-args
+
+  build:
+     - task: download-ingressController
+       cmd: 
+          - git clone https://github.com/kubernetes/ingress-nginx.git -b controller-v1.9.6
+          - cp -r docker/sles-base-nginx/Dockerfile ingress-nginx/images/nginx/rootfs/Dockerfile
+          - cp -r docker/sles-base-nginx/build.sh ingress-nginx/images/nginx/rootfs/build.sh
+  
+  
+  test:
+    - task: check-image-dr
+      docker-image: image-dr-check
+      docker-flags:
+        - "-v /var/run/docker.sock:/var/run/docker.sock"
+        - "-u $(id -u):$(id -g) $(for x in $(id -G); do printf \" --group-add %s\" \"$x\"; done)"
+      cmd: "image-dr-check --image ${var.image-full-name-internal}:${var.version} --output build/image-dr ${var.image-dr-vm-args} || true"
+          
+  # Build a docker image
+  image:
+    - task: docker-build-ingressnginx
+      cmd:
+        - docker build ingress-nginx/images/nginx/rootfs --build-arg GIT_COMMIT=${var.commithash} --build-arg BUILD_DATE=${env.BUILD_DATE} --build-arg IMAGE_BUILD_VERSION=${var.version} --build-arg RSTATE=${var.rstate} --build-arg OS_BASE_IMAGE_REPO=${common.image-base-os-repo} --build-arg OS_BASE_IMAGE_NAME=${common.image-base-os-name} --build-arg OS_BASE_IMAGE_TAG=${common.image-base-os-version} --tag ${image-full-name-ci-internal}:${var.version}
+        - docker push ${var.image-full-name-internal}:${var.version}
+
+  # Publish docker images to drop repository (Call publish only when merged to master)
+  publish:
+    - task: image-pull-internal
+      cmd: docker pull ${var.image-full-name-internal}:${var.version}
+    - task: image-tag-public
+      cmd: docker tag ${var.image-full-name-internal}:${var.version} ${image-full-name}:${var.version}
+    - task: image-push-public
+      cmd: docker push ${image-full-name}:${var.version}
+    - task: git-tag
+      docker-image: adp-release-auto
+      docker-flags:
+        - --env GERRIT_USERNAME
+        - --env GERRIT_PASSWORD
+      cmd: version-handler create-git-tag
+           --git-repo-path .
+           --tag ${var.version}
+           --message "Release ${var.version}"
+
+  remove:
+    - task: nginx image
+      cmd: docker rmi ${var.image-full-name-internal}:${var.version} ${image-full-name}:${var.version} || true
+
+  
+  create-new-cbo-patch:
+    - task: create-new-cbo-patch
+      docker-image: adp-release-auto
+      docker-flags:
+        - "--env GERRIT_USERNAME"
+        - "--env GERRIT_PASSWORD"
+      cmd:
+        - "sed -i 's~image-base-os-repo: .*~image-base-os-repo: ${env.IMAGE_REPO}~' common-properties.yaml"
+        - "sed -i 's/image-base-os-name: .*/image-base-os-name: ${env.IMAGE_NAME}/' common-properties.yaml"
+        - "sed -i 's/image-base-os-version: .*/image-base-os-version: ${env.IMAGE_TAG}/' common-properties.yaml"
+        - config-handler update
+          --set-cbo-version ${env.IMAGE_TAG}
+          --dependencies-file ci_config/dependencies.yaml
+          --debug
+        - gerrit create-patch
+          --file common-properties.yaml ci_config/dependencies.yaml
+          --message "NO JIRA Update Common Base OS to ${env.IMAGE_TAG}"
+          --git-repo-local .
+          --wait-label "Verified"="+1"
+          --debug
+          # If user does not have email set --email ${env.EMAIL}
+        #
